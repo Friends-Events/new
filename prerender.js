@@ -23,7 +23,9 @@ const path = require('path');
 
 const ROOT = __dirname;
 const OUT = path.join(ROOT, 'dist');
-const DOMAIN = 'https://www.friends-events.com';
+// Hauptdomain: so, wie Render sie ausliefert (www leitet bei Render auf diese Domain um)
+const DOMAIN = 'https://friends-events.com';
+const ANY_HOST = /https:\/\/(?:www\.)?friends-events\.com/g;
 const SKIP = new Set(['dist', '.git', '.github', 'node_modules', 'prerender.js']);
 
 function fail(msg) { console.error('\n[PRERENDER] ABBRUCH: ' + msg + '\n'); process.exit(1); }
@@ -64,6 +66,10 @@ function replaceOnce(html, regex, replacement, label) {
 // ---------- 3) Globale Korrekturen (gelten für alle Ausgabedateien) ----------
 let base = SRC;
 
+// 3-0) Alle Domain-Varianten (mit/ohne www) auf die eine Hauptdomain vereinheitlichen
+const hostFixes = (base.match(ANY_HOST) || []).filter(u => u !== DOMAIN).length;
+base = base.replace(ANY_HOST, DOMAIN);
+
 // 3a) Hash-Links mit show('x') -> echte, crawlbare Pfade (Verhalten für Nutzer bleibt gleich)
 let linkFixes = 0;
 base = base.replace(/<a\b[^>]*>/g, tag => {
@@ -76,7 +82,8 @@ base = base.replace(/<a\b[^>]*>/g, tag => {
 
 // 3b) Schema-/Daten-URLs mit Hash-Fragment -> echte Pfade
 let schemaFixes = 0;
-base = base.replace(/https:\/\/www\.friends-events\.com\/#([a-z0-9-]+)/g, (all, slug) => {
+const hashUrlRe = new RegExp(DOMAIN.replace(/[.\/]/g, '\\$&') + '\\/#([a-z0-9-]+)', 'g');
+base = base.replace(hashUrlRe, (all, slug) => {
   const id = hashMap[slug] || (urlMap[slug] ? slug : null);
   if (!id || !urlMap[id]) return all;
   schemaFixes++;
@@ -89,6 +96,11 @@ fs.mkdirSync(OUT, { recursive: true });
 for (const entry of fs.readdirSync(ROOT)) {
   if (SKIP.has(entry) || entry === 'index.html') continue;
   fs.cpSync(path.join(ROOT, entry), path.join(OUT, entry), { recursive: true });
+}
+// sitemap.xml und robots.txt ebenfalls auf die Hauptdomain vereinheitlichen
+for (const f of ['sitemap.xml', 'robots.txt']) {
+  const fp = path.join(OUT, f);
+  if (fs.existsSync(fp)) fs.writeFileSync(fp, fs.readFileSync(fp, 'utf8').replace(ANY_HOST, DOMAIN));
 }
 fs.writeFileSync(path.join(OUT, 'index.html'), base);
 
@@ -152,7 +164,7 @@ for (const [p, id] of Object.entries(pathMap)) {
 const smFile = path.join(ROOT, 'sitemap.xml');
 if (fs.existsSync(smFile)) {
   const sm = fs.readFileSync(smFile, 'utf8');
-  const smPaths = [...sm.matchAll(/<loc>https:\/\/www\.friends-events\.com([^<]*)<\/loc>/g)].map(m => m[1] || '/');
+  const smPaths = [...sm.matchAll(/<loc>https:\/\/(?:www\.)?friends-events\.com([^<]*)<\/loc>/g)].map(m => m[1] || '/');
   const missingInSitemap = [...realPaths].filter(p => !smPaths.includes(p));
   const notBuilt = smPaths.filter(p => !realPaths.has(p));
   if (missingInSitemap.length) console.warn('[PRERENDER] WARNUNG – fehlt in sitemap.xml: ' + missingInSitemap.join(', '));
@@ -160,5 +172,6 @@ if (fs.existsSync(smFile)) {
 }
 
 console.log('[PRERENDER] OK – ' + report.length + ' Unterseiten + Startseite gebaut.');
+console.log('[PRERENDER] Hauptdomain: ' + DOMAIN + ' | Domain-Angaben vereinheitlicht: ' + hostFixes);
 console.log('[PRERENDER] Links korrigiert: ' + linkFixes + ' | Schema-URLs korrigiert: ' + schemaFixes);
 console.log('[PRERENDER] Weiterleitungen: ' + (aliases.join(' | ') || 'keine'));
