@@ -90,6 +90,116 @@ base = base.replace(hashUrlRe, (all, slug) => {
   return DOMAIN + urlMap[id];
 });
 
+
+// ---------- 4b) Strukturierte Daten (Schema.org) pro Seite ----------
+// Regeln:
+//  - Blöcke ohne eigene Unterseiten-URL (LocalBusiness, Organization, WebSite) gelten für alle Seiten.
+//  - Blöcke mit Unterseiten-URL (z. B. Service Fotospiegel) erscheinen NUR auf dieser Unterseite.
+//  - "Product" wird zu "Service" (Mietangebote sind Dienstleistungen, keine Shop-Artikel).
+//  - Bewertungs-Sterne (aggregateRating/review) werden entfernt: die Bewertungen stammen von Google,
+//    fremde Bewertungen dürfen laut Google-Richtlinien nicht als eigenes Schema ausgezeichnet werden.
+//  - Handgeschriebene FAQPage- und BreadcrumbList-Blöcke werden ersetzt durch automatisch erzeugte,
+//    die exakt dem sichtbaren Inhalt der jeweiligen Seite entsprechen (FAQ-Akkordeon, Brotkrümel-Leiste).
+//  - WebSite-Suchfunktion wird entfernt (die Website hat keine Suche).
+const LD_RE = /<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>\s*/g;
+const decode = s => s.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+  .replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\s+/g, ' ').trim();
+const schemaLog = { removedRatings: 0, productsConverted: 0, logoFixed: false };
+
+function stripRatings(obj) {
+  if (Array.isArray(obj)) return obj.forEach(stripRatings);
+  if (obj && typeof obj === 'object') {
+    for (const k of ['aggregateRating', 'review', 'reviews']) if (k in obj) { delete obj[k]; schemaLog.removedRatings++; }
+    Object.values(obj).forEach(stripRatings);
+  }
+}
+function toService(obj) {
+  if (obj['@type'] !== 'Product') return obj;
+  schemaLog.productsConverted++;
+  const s = { '@context': 'https://schema.org', '@type': 'Service', name: obj.name };
+  if (obj.description) s.description = obj.description;
+  s.provider = { '@type': 'LocalBusiness', name: (obj.brand && obj.brand.name) || 'Friends Events Magdeburg' };
+  s.areaServed = { '@type': 'City', name: 'Magdeburg' };
+  if (obj.offers) {
+    const o = Object.assign({}, obj.offers); delete o.availability;
+    s.offers = o;
+  }
+  if (obj.url) s.url = obj.url;
+  return s;
+}
+function pagePathOf(obj) {
+  const u = obj && (obj.url || (obj.offers && obj.offers.url));
+  if (!u || typeof u !== 'string' || !u.startsWith(DOMAIN)) return null;
+  const p = u.slice(DOMAIN.length).replace(/\/$/, '');
+  return p === '' ? null : p;
+}
+
+// Quell-Blöcke einmal aus dem Head lesen
+const SCHEMA_SRC = [];
+{
+  const head = base.slice(0, base.indexOf('</head>'));
+  let m;
+  while ((m = LD_RE.exec(head))) {
+    let obj;
+    try { obj = JSON.parse(m[1]); } catch (e) { fail('Schema-Block ist kein gültiges JSON: ' + m[1].slice(0, 80)); }
+    const t = obj['@type'];
+    if (t === 'FAQPage' || t === 'BreadcrumbList') continue;      // wird pro Seite neu erzeugt
+    if (t === 'WebSite') delete obj.potentialAction;                // keine Suchfunktion vorhanden
+    if (t === 'Organization' && obj.logo && obj.logo.startsWith(DOMAIN)) {
+      const lp = obj.logo.slice(DOMAIN.length);
+      if (!fs.existsSync(path.join(ROOT, lp)) && fs.existsSync(path.join(ROOT, 'icon-512.png'))) {
+        obj.logo = DOMAIN + '/icon-512.png'; schemaLog.logoFixed = true;
+      }
+    }
+    stripRatings(obj);
+    obj = toService(obj);
+    SCHEMA_SRC.push({ obj, page: pagePathOf(obj) });
+  }
+}
+
+function sectionHtml(html, id) {
+  const start = html.search(new RegExp('<div class="page[^"]*" id="page-' + id.replace(/-/g, '\\-') + '"'));
+  if (start === -1) return '';
+  const next = html.slice(start + 10).search(/<div class="page[^"]*" id="page-/);
+  return next === -1 ? html.slice(start) : html.slice(start, start + 10 + next);
+}
+function breadcrumbFor(sec, urlPath) {
+  const m = sec.match(/<div class="bc"[^>]*>([\s\S]*?)<\/div>/);
+  if (!m) return null;
+  const items = [];
+  const re = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>|<span>([\s\S]*?)<\/span>/g;
+  let x;
+  while ((x = re.exec(m[1]))) {
+    if (x[1]) items.push({ name: decode(x[2]), item: DOMAIN + (x[1] === '/' ? '/' : x[1]) });
+    else items.push({ name: decode(x[3]), item: DOMAIN + urlPath });
+  }
+  if (items.length < 2) return null;
+  return { '@context': 'https://schema.org', '@type': 'BreadcrumbList',
+    itemListElement: items.map((it, i) => ({ '@type': 'ListItem', position: i + 1, name: it.name, item: it.item })) };
+}
+function faqFor(sec) {
+  const re = /<details class="faq-item">\s*<summary>([\s\S]*?)<\/summary>\s*<div class="faq-item-body">([\s\S]*?)<\/div>\s*<\/details>/g;
+  const qa = []; let x;
+  while ((x = re.exec(sec))) qa.push({ '@type': 'Question', name: decode(x[1]), acceptedAnswer: { '@type': 'Answer', text: decode(x[2]) } });
+  return qa.length ? { '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: qa } : null;
+}
+function applySchema(html, id, urlPath) {
+  const he = html.indexOf('</head>');
+  let head = html.slice(0, he);
+  const firstLd = head.search(LD_RE);
+  head = head.replace(LD_RE, '');
+  const sec = sectionHtml(html, id);
+  const blocks = SCHEMA_SRC.filter(b => b.page === null || b.page === urlPath).map(b => b.obj);
+  const bc = id === 'home' ? null : breadcrumbFor(sec, urlPath);
+  if (bc) blocks.push(bc);
+  const faq = faqFor(sec);
+  if (faq) blocks.push(faq);
+  const out = blocks.map(b => '<script type="application/ld+json">\n' + JSON.stringify(b, null, 2) + '\n</script>\n').join('');
+  const at = firstLd === -1 ? head.length : firstLd;
+  return { html: head.slice(0, at) + out + head.slice(at) + html.slice(he),
+           types: blocks.map(b => b['@type'] + (b['@type'] === 'Service' ? '(' + b.name + ')' : '')) };
+}
+
 // ---------- 4) Ausgabeordner vorbereiten & sonstige Dateien kopieren ----------
 fs.rmSync(OUT, { recursive: true, force: true });
 fs.mkdirSync(OUT, { recursive: true });
@@ -102,7 +212,9 @@ for (const f of ['sitemap.xml', 'robots.txt']) {
   const fp = path.join(OUT, f);
   if (fs.existsSync(fp)) fs.writeFileSync(fp, fs.readFileSync(fp, 'utf8').replace(ANY_HOST, DOMAIN));
 }
-fs.writeFileSync(path.join(OUT, 'index.html'), base);
+const homeOut = applySchema(base, 'home', '/');
+fs.writeFileSync(path.join(OUT, 'index.html'), homeOut.html);
+const schemaReport = ['/ : ' + homeOut.types.join(', ')];
 
 // ---------- 5) Eine Datei pro Unterseite ----------
 const headEnd = base.indexOf('</head>');
@@ -138,7 +250,9 @@ for (const [id, urlPath] of Object.entries(urlMap)) {
 
   const dir = path.join(OUT, urlPath.replace(/^\//, ''));
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'index.html'), head + body);
+  const pageOut = applySchema(head + body, id, urlPath);
+  fs.writeFileSync(path.join(dir, 'index.html'), pageOut.html);
+  schemaReport.push(urlPath + ' : ' + pageOut.types.join(', '));
   report.push(urlPath);
 }
 
@@ -175,3 +289,5 @@ console.log('[PRERENDER] OK – ' + report.length + ' Unterseiten + Startseite g
 console.log('[PRERENDER] Hauptdomain: ' + DOMAIN + ' | Domain-Angaben vereinheitlicht: ' + hostFixes);
 console.log('[PRERENDER] Links korrigiert: ' + linkFixes + ' | Schema-URLs korrigiert: ' + schemaFixes);
 console.log('[PRERENDER] Weiterleitungen: ' + (aliases.join(' | ') || 'keine'));
+console.log('[PRERENDER] Schema: ' + schemaLog.productsConverted + ' Product->Service | ' + schemaLog.removedRatings + ' Bewertungs-Angaben entfernt' + (schemaLog.logoFixed ? ' | Logo -> icon-512.png' : ''));
+if (process.env.SCHEMA_REPORT) console.log(schemaReport.join('\n'));
