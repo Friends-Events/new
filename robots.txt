@@ -1,4 +1,24 @@
+# robots.txt – friends-events.com
+# Stand: 26.10.2026
+# Die komplette Website darf von allen Suchmaschinen und KI-Suchdiensten gelesen werden.
+
 User-agent: *
 Allow: /
 
-Sitemap: https://www.friends-events.com/sitemap.xml
+# Such- und KI-Crawler ausdrücklich freigegeben (Google, Bing, ChatGPT, Perplexity, Claude, Apple)
+User-agent: Googlebot
+User-agent: Bingbot
+User-agent: Google-Extended
+User-agent: OAI-SearchBot
+User-agent: ChatGPT-User
+User-agent: GPTBot
+User-agent: PerplexityBot
+User-agent: Perplexity-User
+User-agent: Claude-SearchBot
+User-agent: Claude-User
+User-agent: ClaudeBot
+User-agent: Applebot
+User-agent: Applebot-Extended
+Allow: /
+
+Sitemap: https://friends-events.com/sitemap.xml
