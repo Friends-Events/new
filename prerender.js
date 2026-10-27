@@ -1,5 +1,5 @@
 /**
- * Friends Events – Prerender-Build für Render.com  (Version 2, Stand 26.10.2026)
+ * Friends Events – Prerender-Build für Render.com  (Version 2.1, Stand 27.10.2026)
  * ---------------------------------------------------------------------------
  * Erzeugt aus der einen index.html für JEDE Unterseite eine eigene, physische
  * HTML-Datei (z. B. dist/fotospiegel/index.html).
@@ -22,7 +22,7 @@
  *   - eigener <title>, Meta-Description, og:/twitter:-Tags, selbstreferenzierender Canonical
  *   - Hash-Links (#x + show('x')) werden zu echten Pfaden
  *   - Schema-URLs mit Hash -> echte Pfade, Schema pro Seite (Service, Breadcrumb, FAQ)
- *   - alte Wix-URLs (Aliase aus pathMap) werden zu Sofort-Weiterleitungen
+ *   - alte Wix-URLs (Aliase aus pathMap): ab 2.1 als echte 301-Weiterleitung über Render-Regeln
  *
  * Alle Daten (URLs, Titel, Beschreibungen) werden aus der index.html gelesen.
  * Neue Seite = Eintrag in urlMap/titleMap/descMap + Sektion <div class="page" id="page-...">.
@@ -424,23 +424,18 @@ for (const [id, urlPath] of Object.entries(urlMap)) {
   fs.writeFileSync(path.join(OUT, '404.html'), head + bodyStart + sec + '\n' + bodyEnd);
 }
 
-// ---------- 11) Alte URLs (Aliase im pathMap) -> Sofort-Weiterleitung ----------
+// ---------- 11) Alte URLs (Aliase im pathMap) -> echte 301-Weiterleitungen bei Render ----------
+// NEU in 2.1: Für alte Adressen werden KEINE Hilfsseiten mehr erzeugt. Solche Seiten ("Weiterleitung –
+// Friends Events Magdeburg") hat Bing als eigene Treffer angezeigt. Stattdessen übernimmt Render die
+// Weiterleitung mit Status 301 ("dauerhaft umgezogen"). Render wendet seine Redirect-Regeln nur an,
+// wenn unter der alten Adresse keine Datei liegt – deshalb darf der Build dort nichts ablegen.
+// Die nötigen Regeln stehen im Build-Log und müssen einmalig im Render-Dashboard angelegt sein
+// (Static Site -> Redirects/Rewrites, Action: Redirect).
 const realPaths = new Set(Object.values(urlMap));
 const aliases = [];
 for (const [p, id] of Object.entries(pathMap)) {
   if (realPaths.has(p) || !urlMap[id]) continue;
-  const target = urlMap[id];
-  const html = '<!DOCTYPE html><html lang="de"><head><meta charset="UTF-8">' +
-    '<title>Weiterleitung – Friends Events Magdeburg</title>' +
-    '<meta name="robots" content="noindex, follow">' +
-    '<link rel="canonical" href="' + DOMAIN + target + '">' +
-    '<meta http-equiv="refresh" content="0; url=' + target + '">' +
-    '<script>location.replace("' + target + '")</script></head>' +
-    '<body><a href="' + target + '">Weiter zu ' + DOMAIN + target + '</a></body></html>';
-  const dir = path.join(OUT, p.replace(/^\//, ''));
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'index.html'), html);
-  aliases.push(p + ' -> ' + target);
+  aliases.push(p + ' -> ' + urlMap[id]);
 }
 
 // ---------- 12) sitemap.xml: exakt die gebauten Seiten ----------
@@ -499,7 +494,8 @@ console.log('[PRERENDER] Dateigröße: Quelle ' + srcKb + ' KB -> Seiten im Schn
 console.log('[PRERENDER] Hauptdomain: ' + DOMAIN + ' | Domain-Angaben vereinheitlicht: ' + hostFixes);
 console.log('[PRERENDER] Links: ' + linkFixes + ' Hash-Links -> Pfade | ' + onclickRemoved + ' Links auf normalen Seitenaufruf umgestellt | Schema-URLs: ' + schemaFixes);
 console.log('[PRERENDER] Favicons: ' + faviconInfo);
-console.log('[PRERENDER] Sitemap: ' + sitemapInfo + ' | Weiterleitungen: ' + (aliases.join(' | ') || 'keine'));
+console.log('[PRERENDER] Sitemap: ' + sitemapInfo);
+console.log('[PRERENDER] Render-Redirect-Regeln (Action: Redirect, 301) für alte Adressen: ' + (aliases.join(' | ') || 'keine'));
 console.log('[PRERENDER] Schema: ' + schemaLog.productsConverted + ' Product->Service | ' + schemaLog.removedRatings + ' Bewertungs-Angaben entfernt' + (schemaLog.logoFixed ? ' | Logo -> icon-512.png' : ''));
 console.log('[PRERENDER] Hinweise: ' + warnings.length);
 if (process.env.SCHEMA_REPORT) for (const c of checks) {
